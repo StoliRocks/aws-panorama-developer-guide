@@ -29,7 +29,7 @@ class people_counter(panoramasdk.base):
                 ),
             "outputs":
                 (
-                    ("media[video_in]", "video_out", "Camera output stream"),
+                    ("media[video_in]", "video_out", "Video output stream"),
                 )
         }
 
@@ -47,6 +47,8 @@ class people_counter(panoramasdk.base):
             self.epoch_start = time.time()
             self.number_people = 0
             self.colours = np.random.rand(32, 3)
+            self.next_stream = None
+            self.next_image = None
             # Load model
             logger.info("Loading model: " + parameters.people_counter)
             self.model = panoramasdk.model()
@@ -91,12 +93,16 @@ class people_counter(panoramasdk.base):
             self.epoch_start = time.time()
         return True
 
-    def process_stream(self, stream):
+    def process_stream(self, input_stream):
         # Prepare the image and run inference
-        normalized_image = self.preprocess(stream.image)
+        if self.frame_num == 1:
+            self.next_stream = input_stream
+            self.next_image = self.preprocess(self.next_stream.image)
+        output_stream = self.next_stream
         inference_start = time.time()
-        self.model.batch(0, normalized_image)
+        self.model.batch(0, self.next_image)
         self.model.flush()
+        self.next_image = self.preprocess(self.next_stream.image)
         resultBatchSet = self.model.get_result()
         inference_time = (time.time() - inference_start) * 1000
         if inference_time > self.inference_time_max:
@@ -122,12 +128,13 @@ class people_counter(panoramasdk.base):
             top = np.clip(self.rect_array[0][index][1] / np.float(WIDTH), 0, 1)
             right = np.clip(self.rect_array[0][index][2] / np.float(HEIGHT), 0, 1)
             bottom = np.clip(self.rect_array[0][index][3] / np.float(WIDTH), 0, 1)
-            stream.add_rect(left, top, right, bottom)
-            stream.add_label(str(self.prob_array[0][index][0]), right, bottom)
+            output_stream.add_rect(left, top, right, bottom)
+            output_stream.add_label(str(self.prob_array[0][index][0]), right, bottom)
         # Add text
-        stream.add_label('People detected: {}'.format(self.number_people), 0.02, 0.93)
+        output_stream.add_label('People detected: {}'.format(self.number_people), 0.02, 0.93)
         self.model.release_result(resultBatchSet)
-        return stream
+        self.next_stream = input_stream
+        return output_stream
 
     def preprocess(self, img):
         if self.frame_num == 1:
