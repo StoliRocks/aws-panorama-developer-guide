@@ -47,8 +47,8 @@ class people_counter(panoramasdk.base):
             self.epoch_start = time.time()
             self.number_people = 0
             self.colours = np.random.rand(32, 3)
-            self.next_stream = None
-            self.next_image = None
+            self.next_media = {}
+            self.next_image = {}
             # Load model
             logger.info("Loading model: " + parameters.people_counter)
             self.model = panoramasdk.model()
@@ -73,7 +73,7 @@ class people_counter(panoramasdk.base):
         self.frame_num += 1
         # Loop through attached video streams
         for i in range(len(inputs.video_in)):
-            outputs.video_out[i] = self.process_stream(inputs.video_in[i])
+            outputs.video_out[i] = self.process_media(inputs.video_in[i])
         # Log metrics
         frame_time = (time.time() - frame_start) * 1000
         if frame_time > self.frame_time_max:
@@ -82,7 +82,7 @@ class people_counter(panoramasdk.base):
         if self.frame_num % self.epoch_frames == 0:
             epoch_time = time.time() - self.epoch_start
             logger.info('epoch length: {:.3f} s ({:.3f} FPS)'.format(epoch_time, self.epoch_frames/epoch_time))
-            logger.info('avg inference time: {:.3f} ms'.format(self.inference_time_ms / self.epoch_frames))
+            logger.info('avg inference time: {:.3f} ms'.format(self.inference_time_ms / self.epoch_frames / len(inputs.video_in)))
             logger.info('max inference time: {:.3f} ms'.format(self.inference_time_max))
             logger.info('avg frame processing time: {:.3f} ms'.format(self.frame_time_ms / self.epoch_frames))
             logger.info('max frame processing time: {:.3f} ms'.format(self.frame_time_max))
@@ -93,23 +93,27 @@ class people_counter(panoramasdk.base):
             self.epoch_start = time.time()
         return True
 
-    def process_stream(self, input_stream):
+    def process_media(self, media):
+        stream = media.stream_uri
+        # set up stream buffer
+        if not self.next_media.get(stream):
+            self.next_media[stream] = media
+            self.next_image[stream] = self.preprocess(media.image)
+            logger.info('Set up frame buffer for stream: {}'.format(stream))
+            logger.info("Frame image size: {}".format(media.image.shape))
         # Prepare the image and run inference
-        if self.frame_num == 1:
-            self.next_stream = input_stream
-            self.next_image = self.preprocess(self.next_stream.image)
-        output_stream = self.next_stream
+        output = self.next_media[stream]
         inference_start = time.time()
-        self.model.batch(0, self.next_image)
+        self.model.batch(0, self.next_image[stream])
         self.model.flush()
-        self.next_image = self.preprocess(self.next_stream.image)
+        self.next_image[stream] = self.preprocess(self.next_media[stream].image)
         resultBatchSet = self.model.get_result()
         inference_time = (time.time() - inference_start) * 1000
         if inference_time > self.inference_time_max:
             self.inference_time_max = inference_time
         self.inference_time_ms += inference_time
         # Process results
-        #   Model outputs (classes, probabilities, rectangles) are collected in 
+        #   Model outputs (classes, probabilities, bounding boxes) are collected in 
         #   the BatchSet returned by model.get_result
         #   Each output is a Batch of arrays, one for each input in the batch
         classes = resultBatchSet.get(0)
@@ -128,17 +132,15 @@ class people_counter(panoramasdk.base):
             top = np.clip(self.rect_array[0][index][1] / np.float(WIDTH), 0, 1)
             right = np.clip(self.rect_array[0][index][2] / np.float(HEIGHT), 0, 1)
             bottom = np.clip(self.rect_array[0][index][3] / np.float(WIDTH), 0, 1)
-            output_stream.add_rect(left, top, right, bottom)
-            output_stream.add_label(str(self.prob_array[0][index][0]), right, bottom)
+            output.add_rect(left, top, right, bottom)
+            output.add_label(str(self.prob_array[0][index][0]), right, bottom)
         # Add text
-        output_stream.add_label('People detected: {}'.format(self.number_people), 0.02, 0.93)
+        output.add_label('People detected: {}'.format(self.number_people), 0.02, 0.9)
         self.model.release_result(resultBatchSet)
-        self.next_stream = input_stream
-        return output_stream
+        self.next_media[stream] = media
+        return output
 
     def preprocess(self, img):
-        if self.frame_num == 1:
-            logger.info("Frame image size: {}".format(img.shape))
         resized = cv2.resize(img, (HEIGHT, WIDTH))
         mean = [0.485, 0.456, 0.406]
         std = [0.229, 0.224, 0.225]
