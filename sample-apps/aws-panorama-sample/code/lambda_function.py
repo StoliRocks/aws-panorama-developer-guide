@@ -47,8 +47,8 @@ class people_counter(panoramasdk.base):
             self.epoch_start = time.time()
             self.number_people = 0
             self.colours = np.random.rand(32, 3)
-            self.next_media = {}
-            self.next_image = {}
+            self.buffered_media = {}
+            self.buffered_image = {}
             # Load model
             logger.info("Loading model: " + parameters.people_counter)
             self.model = panoramasdk.model()
@@ -95,18 +95,20 @@ class people_counter(panoramasdk.base):
 
     def process_media(self, media):
         stream = media.stream_uri
-        # set up stream buffer
-        if not self.next_media.get(stream):
-            self.next_media[stream] = media
-            self.next_image[stream] = self.preprocess(media.image)
+        # Set up stream buffer
+        if not self.buffered_media.get(stream):
+            self.buffered_media[stream] = media
+            self.buffered_image[stream] = self.preprocess(media.image)
             logger.info('Set up frame buffer for stream: {}'.format(stream))
-            logger.info("Frame image size: {}".format(media.image.shape))
-        # Prepare the image and run inference
-        output = self.next_media[stream]
+            logger.info('Stream image size: {}'.format(media.image.shape))
+        output = self.buffered_media[stream]
+        # Run inference on the buffered image
         inference_start = time.time()
-        self.model.batch(0, self.next_image[stream])
+        self.model.batch(0, self.buffered_image[stream])
         self.model.flush()
-        self.next_image[stream] = self.preprocess(self.next_media[stream].image)
+        # While waiting for inference, preprocess the current image
+        self.buffered_image[stream] = self.preprocess(media.image)
+        self.buffered_media[stream] = media
         resultBatchSet = self.model.get_result()
         inference_time = (time.time() - inference_start) * 1000
         if inference_time > self.inference_time_max:
@@ -137,7 +139,6 @@ class people_counter(panoramasdk.base):
         # Add text
         output.add_label('People detected: {}'.format(self.number_people), 0.02, 0.9)
         self.model.release_result(resultBatchSet)
-        self.next_media[stream] = media
         return output
 
     def preprocess(self, img):
